@@ -22092,9 +22092,9 @@ def _get_tracking_board(ctx):
 def _mate_move_accepted(ctx, mate_move, source_label):
     """[単一検問所] 詰み主張に基づいて採る手が連続王手の千日手にならないか判定する。
 
-    [ZYF-GUARD 2026-10-17] Zyfamate が自分で答える初手 (根の詰み / MPON) の検問は Zyfamate 本体へ
-    移した (yfamate/Zyfamate#2)。ここに残る呼び出しは Zyfamate の初手ではない手 — DL の頭手
-    (PV-MATE / conviction-mate)、詰み PV キャッシュの後続手、千日手拒否の代替手 — だけ。
+    [MERGE-DEBUG 2026-10-18] #11 は根の詰み / MPON の検問を Zyfamate#2 へ移したとしたが、Zyfamate#2 が
+    履歴を受け取るのは USI position ... moves / zyf_set_root_history() のみで、Pyfamate は
+    `solve <素の SFEN>` で呼ぶため履歴が届かない (外部 df-pn には除外自体が無い)。両経路の検問を戻した。
 
     これは「1 つのエンジン (mate solver) に対する 4 つの採用経路」を 1 関数に
     集約した唯一の検問所である。各経路 (現局面 mate 直接採用 / nnue-only PV
@@ -23920,11 +23920,14 @@ def _u_harvest_mate(st):
         # #OUTE_SENNICHITE 反則負け (即敗) になりうる。単一検問所を通し、
         # 拒否されたら None を返して通常の verdict (council/light/endgame の
         # 投票結果) へフォールバックさせる (他の mate 採用経路と同じ規律)。
-        # [ZYF-GUARD 2026-10-17] 連続王手の千日手の検問は Zyfamate 本体 (根の対局履歴で初手を除外,
-        #   yfamate/Zyfamate#2) が行う — Cyfamate も同じ Zyfamate を検問なしで使うため、検問は
-        #   Pyfamate 側から外して Zyfamate に一本化した。ソルバーには履歴付きの position を渡している。
+        # [MERGE-DEBUG 2026-10-18] #11 はここの検問を「Zyfamate#2 が根の履歴で初手を除外する」として外したが、
+        #   Zyfamate#2 が履歴を取るのは USI の position ... moves だけ。Pyfamate の Zyfamate 経路は
+        #   `solve <nodes> <timeout> <素の SFEN>` (履歴なし, _u_spawn_mate/_zf_mate_worker) で、
+        #   Zyfamate オフ時の外部 df-pn には Zyfamate#2 の除外自体が無い → 検問を戻す。
         if mr.result == "mate" and mr.best_move not in (None, "", "resign", "win"):
-            return mr.best_move
+            if _mate_move_accepted(ctx, mr.best_move, "unify-mate"):
+                return mr.best_move
+            return None
     except Exception as _e:
         _flog(f"[ignored] _u_harvest_mate: {_e!r}")
     return None
@@ -24447,7 +24450,7 @@ _SENNICHITE_ALT_MAX_LOSS_CP = 150
 
 def _u_council_mate_ponder(st):
     """[MPON] 相手番 df-pn 証明済み詰みを ponderhit 時に収穫 (原 ≈27834)。consume-once。
-    [ZYF-GUARD 2026-10-17] 連続王手の千日手は Zyfamate が根の履歴 (予測局面の position) で初手から除外する。"""
+    採用は _mate_move_accepted (連続王手千日手) 検問を通す ([MERGE-DEBUG 2026-10-18] #11 の撤去を戻した)。"""
     ctx = st.ctx
     if st.verdict in (None, "", "resign", "win"):
         return
@@ -24455,10 +24458,12 @@ def _u_council_mate_ponder(st):
     if (rec is not None and rec[0] == "mate"
             and rec[1] not in (None, "", "resign", "win")):
         mv = rec[1]
-        st.verdict = mv
-        st.ponder_move = None
-        _flog(f"[MPON] OVERRIDE (unify council): bestmove -> {mv} "
-              "(相手番 df-pn 証明済み詰み)")
+        # [MERGE-DEBUG 2026-10-18] 検問を戻す (_u_harvest_mate と同じ理由: Zyfamate へは履歴なし SFEN)。
+        if _mate_move_accepted(ctx, mv, "mate-ponder-council"):
+            st.verdict = mv
+            st.ponder_move = None
+            _flog(f"[MPON] OVERRIDE (unify council): bestmove -> {mv} "
+                  "(相手番 df-pn 証明済み詰み)")
 
 def _u_council_sennichite(st):
     """[千日手拒否] 採用手が同一局面 2 回目なら DL_2 top の非千日手へ差替 (原 ≈27879)。
