@@ -1,12 +1,3 @@
-"""Council v2 (SvArbiter) regression tests — 2026-10-17.
-
-Selected definitions are extracted from Pyfamate.py by AST and executed with host plumbing stubbed
-(no engine, no GPU, no Pyfamate import side effects). Every check states the corrected behaviour.
-
-Usage:
-  python tests/test_council_v2.py            numpy-only checks
-  python tests/test_council_v2.py --train    + end-to-end arbiter-train/tau/eval on synthetic rows (needs torch)
-"""
 import ast, contextlib, dataclasses, io, json, math, os, random, re, sys, tempfile, threading, types
 from pathlib import Path
 
@@ -32,7 +23,6 @@ TMP = Path(tempfile.mkdtemp(prefix="council_v2_"))
 mod = types.ModuleType("council_v2_extract"); sys.modules[mod.__name__] = mod
 g = mod.__dict__
 
-
 class _Cfg:
     arbiter_override_tau = 0.62
     arbiter_tau_gp_slope = 0.25
@@ -40,17 +30,14 @@ class _Cfg:
     arbiter_feature_tier = "scalar"
     arbiter_tier_gp_switch = 0.0
 
-
 class EngineConfig:
     @classmethod
     def from_cfg(cls, cfg):
         return _Cfg()
 
-
 def _count_moves(pos):
     t = str(pos).split()
     return len(t) - t.index("moves") - 1 if "moves" in t else 0
-
 
 g.update(dataclasses=dataclasses, os=os, re=re, json=json, threading=threading, math=math,
          _flog=lambda *a, **k: None, _dlog=lambda *a, **k: None, _sv_arbiter_instance=None,
@@ -72,13 +59,10 @@ assert not missing, missing
 SvArbiter, ArbCand = g["SvArbiter"], g["ArbCand"]
 RESULTS = {}
 
-
 def check(name, cond, detail=None):
     RESULTS[name] = bool(cond)
     print(("PASS " if cond else "FAIL ") + name + ("" if detail is None else "  %s" % (detail,)))
 
-
-# 1. PV origin: candidate move is applied once.
 pv_after = g["_arb_pv_after_move"]
 check("pv_head_dropped", pv_after("7g7f", "7g7f 3c3d 2g2f") == ["3c3d", "2g2f"])
 check("pv_without_head_kept", pv_after("7g7f", ["3c3d", "2g2f"]) == ["3c3d", "2g2f"])
@@ -90,8 +74,6 @@ leaf = per[0][2]
 check("pv_leaf_equals_root_plus_pv_once",
       leaf is not None and leaf.cells == want.cells and leaf.side == want.side and per[0][3] == 1)
 
-# 2. Override decision is winner vs NNUE, not winner vs runner-up (JUDGE-GATE counterexample).
-# order: 0=nnue 1=dl 2=seed.  P(dl>seed)=0.668, P(dl>nnue)=0.45, P(nnue>seed)=0.6
 pw = [[0.5, 0.55, 0.60], [0.45, 0.5, 0.668], [0.40, 0.332, 0.5]]
 lg = lambda p: math.log(p / (1 - p))
 score = [sum(lg(pw[i][j]) for j in range(3) if j != i) for i in range(3)]
@@ -104,7 +86,6 @@ check("decide_override_uses_p_vs_nnue", pick == 1 and abs(p - 0.70) < 1e-9 and n
 pick, wi, p, ab = SvArbiter.decide(score2, pw2, 0, 0.75)
 check("decide_abstains_below_tau", pick == 0 and wi == 1 and ab)
 
-# 3. Targets: 3-candidate hard label y=2 means seed beats both (old trainer taught "cand 1 wins").
 tg = g["_arb_pair_targets"]({"cands": [{}, {}, {}], "y": 2, "w": 0.1})
 check("hard_label_y2_three_cands", sorted(tg) == [(0, 2, 0.0, 0.1), (1, 2, 0.0, 0.1)], tg)
 tg = g["_arb_pair_targets"]({"cands": [{}, {}], "wr_nn": [0.40, 0.60], "wr_dl": [0.44, 0.56], "bucket": "D"})
@@ -112,15 +93,12 @@ check("soft_target_follows_consensus_wr", len(tg) == 1 and tg[0][2] < 0.5 and tg
 cons = g["_arb_consensus_wr"]({"cands": [{}, {}], "wr_nn": [0.4, None], "wr_dl": [0.5, 0.7]})
 check("consensus_wr_mean_or_single", abs(cons[0] - 0.45) < 1e-9 and abs(cons[1] - 0.7) < 1e-9, cons)
 
-# 4. Split by game key hash (deterministic, ≈frac), not by sorted prefix.
 keys = ["start_sfens_ply24.txt/%08x" % i for i in range(4000)] + ["start_sfens_ply32.txt/%08x" % i for i in range(4000)]
 iv = [g["_arb_is_val"](k, 0.1) for k in keys]
 check("val_split_hash_fraction", 0.08 < sum(iv) / len(iv) < 0.12, sum(iv) / len(iv))
 check("val_split_spans_sources", any(iv[:4000]) and any(iv[4000:]))
 check("val_split_deterministic", iv == [g["_arb_is_val"](k, 0.1) for k in keys])
 
-
-# 5. Head loading: legacy (no meta / v1 dims) rejected, v2 accepted; sources filter; OOD; tau json.
 def _write_head(path, din, meta=True, sources="nnue,dl1", gp=(0.1, 0.5), seed=0):
     rng = np.random.default_rng(seed)
     d = {"s_W0": rng.normal(size=(din, 8)).astype("float32"), "s_b0": np.zeros(8, "float32"),
@@ -130,11 +108,9 @@ def _write_head(path, din, meta=True, sources="nnue,dl1", gp=(0.1, 0.5), seed=0)
                  meta_lambda=np.asarray(0.5), meta_gp_lo=np.asarray(gp[0]), meta_gp_hi=np.asarray(gp[1]))
     np.savez(path, **d)
 
-
 def _fresh():
     g["_sv_arbiter_instance"] = None
     return g["_sv_arbiter_get"]()
-
 
 npz = TMP / "arbiter_head.npz"
 _write_head(npz, 14, meta=False)
@@ -159,7 +135,6 @@ arb = _fresh(); arb.load()
 check("tau_json_ignored_for_other_head", arb.tau is None)
 os.remove(TMP / "arbiter_tau.json")
 
-# 6. Train/serve feature parity: a labeled row and the runtime scalars give the same shared vector.
 pos = "position startpos moves 7g7f 3c3d 2g2f"
 row = {"sfen": pos, "eff_s": 3.0, "cands": [{"move": "8c8d", "source": "nnue", "cp": 10, "depth": 18, "nodes": 123456},
                                             {"move": "4a3b", "source": "dl1", "cp": 40, "depth": 7}]}
@@ -170,11 +145,7 @@ check("train_serve_shared_features_equal", np.allclose(sh_train, SvArbiter._shar
       (sh_train, SvArbiter._shared_features(rt)))
 check("shared_features_not_degenerate", sh_train[2] > 0 and sh_train[3] > 0 and sh_train[4] > 0, sh_train)
 
-
-# 7. End-to-end train → tau → eval on synthetic rows (torch).
 def _synthetic_rows(n, seed=1):
-    """Ground truth: DL's move is better iff its depth is high relative to the position phase.
-    NNUE always-pick has positive regret; a learned arbiter should cut it."""
     rng = random.Random(seed)
     rows = []
     for k in range(n):
@@ -192,7 +163,6 @@ def _synthetic_rows(n, seed=1):
                                {"move": "2g2f", "source": "dl1", "cp": rng.randint(-100, 100), "depth": dld}],
                      "wr_nn": [wr_nn_c + noise(), wr_dl_c + noise()], "wr_dl": [wr_nn_c + noise(), wr_dl_c + noise()]})
     return rows
-
 
 if "--train" in sys.argv:
     os.remove(npz)
@@ -222,7 +192,6 @@ if "--train" in sys.argv:
     check("tau_json_bound_to_trained_head", tj["head_sha256"] == arb.head_sha and arb.tau == tj["Arbiter_Override_Tau"])
     check("tau_regret_not_worse_than_nnue", tj["regret_arb"] <= tj["regret_nnue"], tj)
 
-    # Tier-T smoke: random-init trunk checkpoint as --base, real positions and PVs, 1 epoch.
     import torch
     trunk = g["_sv_build_model"](ch=16, blocks=1, ver=3, in_ch=g["sv_N_PLANES"], arb=True)
     torch.save({"model": trunk.state_dict()}, TMP / "base.pt")

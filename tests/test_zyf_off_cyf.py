@@ -1,9 +1,3 @@
-"""[ZYF-OFF-CYF 2026-10-19] Pyfamate cuts its own Zyfamate / mate solver when nnue_1 carries a resident
-Zyfamate (Cyfamate, USI options "Cyf_Zyf_*").
-
-AST-extracts the helpers from Pyfamate.py and runs them with stubs (no engines).
-Usage: python tests/test_zyf_off_cyf.py
-"""
 import ast, os, sys, tempfile, types
 from pathlib import Path
 
@@ -75,8 +69,6 @@ ctx2 = types.SimpleNamespace(mate_solver=ms2, _zyfamate=False, _zyfamate_has_tsu
 off(ctx2); off(ctx2)
 ok(ms2.quits == 0 and ctx2.mate_solver is None, "runtime cut: not-started solver not quit; idempotent")
 
-# wiring: the import-time gate sits in _mate_solver_enable, the runtime cut follows nnue_1 initialize,
-# the makebook digger checks the engine.
 ok("and not _zyf_off_with_cyfamate" in _src.split("_mate_solver_enable = (", 1)[1].split(")", 1)[0],
    "wiring: _mate_solver_enable gated by _zyf_off_with_cyfamate")
 _i = _src.index('_init_usiok_retry("ctx.nnue_1", ctx.nnue_1, _nnue_1_opts)')

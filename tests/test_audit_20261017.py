@@ -1,9 +1,3 @@
-"""Regression checks for the 2026-10-17 Pyfamate audit fixes.
-
-AST-extracts the touched definitions from Pyfamate.py and runs them with stubs
-(no engines, no GPU). Every check states the corrected behaviour.
-Usage: python tests/test_audit_20261017.py
-"""
 import ast, collections, dataclasses, enum, json, math, os, queue, re, sys, threading, time, types
 from pathlib import Path
 
@@ -30,7 +24,7 @@ _src = SRC.read_text(encoding="utf-8-sig")
 for n in tree.body:
     if isinstance(n, (ast.Import, ast.Assign, ast.For, ast.AnnAssign)) and (
             "_zb" in (_seg(_src, n) or "") or "_ZB_" in (_seg(_src, n) or "")):
-        nodes.append(n)   # Zobrist tables used by ShogiBoard
+        nodes.append(n)
     elif getattr(n, "name", None) in WANT:
         nodes.append(n)
     elif isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and (t.id in ASSIGN or t.id.startswith("_RE_"))
@@ -43,19 +37,15 @@ missing = WANT - set(g)
 assert not missing, missing
 R = {}
 
-
 def check(name, cond, detail=None):
     R[name] = bool(cond)
     print(("PASS " if cond else "FAIL ") + name + ("" if detail is None else "  %r" % (detail,)))
 
-
-# 1. mate score forms: `mate +`, `mate -`, `mate +5`, `mate -3`.
 P = g["_parse_usi_line"]
 for txt, want in (("info depth 9 score mate + pv 2b8h+", 1), ("info depth 9 score mate - pv 8h2b", -1),
                   ("info depth 9 score mate +5 pv 2b8h+", 5), ("info depth 9 score mate -3 pv 1a1b", -3)):
     check("mate_parse " + txt.split("score ")[1].split(" pv")[0], P(txt).mate == want, P(txt).mate)
 
-# 2. legality: self-check from a non-check position (pinned piece) and dead-end pieces.
 SB = g["ShogiBoard"]
 b2 = SB(sfen="sfen 4r4/9/9/9/9/9/9/4G4/3K5 b - 1")
 check("sanity_not_in_check", not b2._is_king_attacked(b2.side))
@@ -70,18 +60,14 @@ b5 = SB(sfen="sfen 4k4/8P/9/9/9/9/9/9/4K4 b - 1")
 check("pawn_to_last_rank_without_promotion_illegal", b5.illegal_drop_reason("1b1a") == "dead_end")
 check("pawn_to_last_rank_with_promotion_legal", b5.illegal_drop_reason("1b1a+") is None)
 
-# 3. conviction-mate never overrides a declaration.
 C = g["_dl_conviction_mate_core"]
 check("conviction_mate_keeps_win", C(False, "2b3c", "win", True, None) is False)
 check("conviction_mate_still_fires", C(False, "2b3c", "7g7f", True, None) is True)
 
-# 4. MoveBudget.left_s counts byoyomi.
 MB = g["MoveBudget"]
 mb = MB(eff_s=9.6, remaining_ms=400, t0=time.perf_counter(), byo_ms=10000)
 check("left_s_includes_byoyomi", mb.left_s() > 5.0, round(mb.left_s(), 2))
 
-
-# 5. stale bestmove drain by go/bestmove counts.
 class FakeEng:
     def __init__(self, lines, go_sent, bm_seen):
         self._q = queue.Queue()
@@ -97,14 +83,12 @@ class FakeEng:
             self._bm_seen += 1
         return ln
 
-
 e = FakeEng(["info depth 3 pv 7g7f", "bestmove 7g7f", "info depth 1 pv 2g2f"], go_sent=2, bm_seen=0)
 ok = g["_drain_until_outstanding"](e, 1, 0.5, "t", send_stop=False)
 check("drain_keeps_latest_go", ok and e._go_sent - e._bm_seen == 1 and e._q.get_nowait() == "info depth 1 pv 2g2f")
 e = FakeEng([], go_sent=3, bm_seen=3)
 check("drain_noop_when_caught_up", g["_drain_until_outstanding"](e, 0, 0.1, "t") and e.sent == [])
 
-# 6. ponder aligned with an overridden verdict.
 st = types.SimpleNamespace(verdict="2g2f", nnue_top="7g7f", dl_top="2g2f", pv_mate_override=False,
                            ponder_move="3c3d", dl1_pv_lines={"2g2f": ["2g2f", "8c8d", "2f2e"]})
 g["_u_align_ponder"](st)
@@ -118,30 +102,26 @@ st = types.SimpleNamespace(verdict="7g7f", nnue_top="7g7f", dl_top="2g2f", pv_ma
 g["_u_align_ponder"](st)
 check("ponder_kept_when_nnue_move_played", st.ponder_move == "3c3d")
 
-# 7. stale-exempt reads the record key that exists and tolerates None gap_min.
 cfg = types.SimpleNamespace(council_sanity_enable=True, council_sanity_window=2)
 ctx = types.SimpleNamespace(cfg=cfg, game_log=[{"council_winner": "7g7f"},
                                                {"council_winner": "7g7f", "score_gap_dl_nnue": 400,
                                                 "dl_gap_min_used": None}])
 check("stale_exempt_uses_score_gap_dl_nnue", g["_check_council_stale"](ctx, "7g7f") is False)
 
-# 8. setoption with an empty value parses.
 m = g["_RE_SETOPTION"].match("setoption name OppID_DL_Names value")
 check("setoption_empty_value_parses", m is not None and m.group(2) == "", m and m.groups())
 m = g["_RE_SETOPTION"].match("setoption name USI_Hash value 1024")
 check("setoption_value_parses", m.group(1) == "USI_Hash" and m.group(2) == "1024")
 
-# 9. perpetual check: all of our moves in the cycle were checks -> refuse; a cycle with one quiet move -> not perpetual.
 cyc = "2i1i 1a2a 1i2i 2a1a " * 3
 bp = SB(sfen="sfen 8k/9/9/9/9/9/9/9/4K2R1 b - 1 moves " + cyc.strip())
 check("perpetual_check_detected", bp.is_perpetual_check_move("2i1i") is True)
 nb = bp._after_usi("2i1i")
 fl = nb._hist_check_flags()
 check("check_flags_rebuilt_lazily", fl is not None and len(fl) == 13 and all(fl[0::2]), fl)
-fl[8] = False   # pretend one of sente's moves in the cycle was quiet
+fl[8] = False
 check("plain_repetition_completed_by_check_not_perpetual", nb.perpetual_checker(flags=fl) is None)
 
-# 10. dedup helpers keep behaviour.
 acc = g["_DlInfoAcc"]()
 for ln in ("info depth 5 multipv 1 score cp 120 pv 7g7f 3c3d", "info depth 9 multipv 1 score cp 80 pv 7g7f 8c8d",
            "info depth 9 multipv 2 score mate + pv 2g2f", "info depth 3 score cp 10"):
@@ -150,12 +130,9 @@ check("dl_acc_scores", acc.moves_scores == {"7g7f": 80, "2g2f": g["_MATE_CP"]}, 
 check("dl_acc_deepest_pv", acc.pv_lines["7g7f"] == ["7g7f", "8c8d"] and acc.depth_best["7g7f"] == 9)
 check("mb_parse_num", g["_mb_parse_num"]("x", 5) == 5 and g["_mb_parse_num"](" 2.5 ", 0, to_int=False, hi=2.0) == 2.0)
 
-# 11. one perpetual-check rule: makebook uses the board's (first occurrence -> now, all checks).
 kif = ["sfen 8k/9/9/9/9/9/9/9/4K2R1 b - 1"] + (cyc.strip() + " 2i1i").split()
 check("makebook_perpetual_checker_sente", g["_mb_perpetual_checker"](kif) == "b")
 check("makebook_no_repetition_none", g["_mb_perpetual_checker"](kif[:5]) is None)
-
-# 12. 打ち歩詰め is Zyfamate's job (gen_checks excludes pawn-drop mates); Pyfamate no longer duplicates it.
 
 bad = [k for k, v in R.items() if not v]
 print("%d/%d PASS" % (len(R) - len(bad), len(R)))
