@@ -6184,6 +6184,10 @@ _CONFIG_DEFAULTS = {
     "Conviction_Hub_Tonshi_Max":            0.92,   # これ超なら頓死ガード df-pn を省略 (時間節約)
     "mate_solver_Join_Timeout_Ms":    "500",
     "mate_solver_Enable":             "true",
+    # [ZYF-OFF-CYF 2026-10-19] nnue_1 が Zyfamate 常駐エンジン (Cyfamate: USI option "Cyf_Zyf_*") なら
+    # Pyfamate 側の mate solver / Zyfamate 呼び出し・配線を全て切る (詰み探索はエンジン内の Zyfamate が担う)。
+    # false = 従来どおり Pyfamate 側でも Zyfamate を起動する。
+    "Zyfamate_Off_With_Cyfamate":     "true",
     # [MATE-PROTO] go mate プロトコル (USI 詰将棋拡張) の使用。
     #   auto : 初回 `go mate <ms>` を試行し、checkmate notimplemented (または
     #          無応答 2 回) を確認したら以後 `go movetime` へ恒久フォールバック。
@@ -9659,9 +9663,59 @@ _early_ponder = False  # Pyfamate 内部の「go ponder を子へ転送するか
 # ----------------------------------------------------------------
 # モジュールレベル変数。main() 内でインスタンスを起動する。
 # ----------------------------------------------------------------
+# [ZYF-OFF-CYF 2026-10-19] Cyfamate は Zyfamate を内蔵常駐している (USI option "Cyf_Zyf_*")。その
+# エンジンが nnue_1 なら Pyfamate 側の Zyfamate (csa solve / serve / USI 詰めエンジン / tsumero / tesuki /
+# makebook digger) は二重で、CPU を主探索から奪うだけ → 全て切る。判定は 2 段:
+#   (1) import 時: nnue_1 の native exe のバイト列に "Cyf_Zyf_" があるか (起動しない; probe 前に決まるので
+#       Zyfamate を一度も起動しない)。.bat/.sh 等で判定不能なら (2) へ。
+#   (2) isready 時: nnue_1 の usi 応答 (announced_options) に "Cyf_Zyf_*" があれば ctx から切る
+#       (mate solver の起動は usinewgame なので未起動のうちに外れる)。
+_ZYF_RESIDENT_MARK = "Cyf_Zyf_"
+
+
+def _engine_has_resident_zyfamate(path):
+    """exe のバイト列に Zyfamate 常駐の印 ("Cyf_Zyf_") があるか。起動はしない。
+    True / False / None (判定不能: 空・不在・.bat/.cmd/.sh/.py ラッパー・読込失敗)。"""
+    try:
+        import mmap
+        _p = str(path or "").strip().strip('"')
+        if not _p:
+            return None
+        if not os.path.isabs(_p):
+            _p = os.path.join(_BASE_DIR, _p)
+        if not os.path.isfile(_p):
+            return None
+        if os.path.splitext(_p)[1].lower() in (".bat", ".cmd", ".sh", ".py"):
+            return None
+        with open(_p, "rb") as _f:
+            if os.fstat(_f.fileno()).st_size == 0:
+                return None
+            with mmap.mmap(_f.fileno(), 0, access=mmap.ACCESS_READ) as _m:
+                return _m.find(_ZYF_RESIDENT_MARK.encode("ascii")) >= 0
+    except Exception as _e:
+        _flog(f"[ZYF-OFF-CYF] resident check failed (ignored): {path!r}: {_e!r}")
+        return None
+
+
+def _announces_resident_zyfamate(eng):
+    """起動済みエンジンの usi 応答に Zyfamate 常駐 option ("Cyf_Zyf_*") があるか。"""
+    return any(str(_k).startswith(_ZYF_RESIDENT_MARK)
+               for _k in (getattr(eng, "announced_options", None) or ()))
+
+
+_zyf_off_with_cyfamate = (
+    not _MP_LIGHT_IMPORT
+    and _cfg_bool("Zyfamate_Off_With_Cyfamate", True)
+    and _engine_has_resident_zyfamate(nnue_1_PATH) is True
+)
+if _zyf_off_with_cyfamate:
+    _flog(f"[ZYF-OFF-CYF] nnue_1 has resident Zyfamate (Cyf_Zyf_*): {nnue_1_PATH} "
+          f"— Pyfamate-side mate solver / Zyfamate off (Zyfamate_Off_With_Cyfamate=true)")
+
 _mate_solver_path    = str(_cfg["mate_solver_Path"]).strip()
 _mate_solver_enable = (
     not _MP_LIGHT_IMPORT   # [LIGHT-IMPORT] spawn 子は mate solver プローブ不要
+    and not _zyf_off_with_cyfamate   # [ZYF-OFF-CYF] Zyfamate はエンジン内に常駐
     and _cfg_bool("mate_solver_Enable")
     and bool(_mate_solver_path)
 )
@@ -25542,6 +25596,30 @@ def _sfen_for_position(position_cmd):
     return _board_for_position(position_cmd).sfen()
 
 
+def _zyf_off_runtime(ctx):
+    """[ZYF-OFF-CYF] nnue_1 が Zyfamate 常駐エンジンと判明した時点で Pyfamate 側の Zyfamate /
+    mate solver を ctx から外す (csa solve・serve・USI 詰めエンジン・tsumero・tesuki の全経路が
+    ctx._zyfamate / ctx.mate_solver で守られている)。冪等。"""
+    global _zyf_off_with_cyfamate
+    _zyf_off_with_cyfamate = True
+    _ms = ctx.mate_solver
+    ctx.mate_solver = None
+    ctx._zyfamate = False
+    ctx._zyfamate_has_tsumero = False
+    ctx._zyfamate_has_tesuki = False
+    if _ms is not None and getattr(_ms, "_alive", False):
+        try:
+            _ms.quit()
+        except Exception as _e:
+            _flog(f"[ignored] _zyf_off_runtime quit: {_e!r}")
+    try:
+        _zf_serve_shutdown()
+    except Exception as _e:
+        _flog(f"[ignored] _zyf_off_runtime serve shutdown: {_e!r}")
+    _flog("[ZYF-OFF-CYF] nnue_1 announces resident Zyfamate (Cyf_Zyf_*) — "
+          "Pyfamate-side mate solver / Zyfamate off for this process")
+
+
 def _zf_mate_worker(mr, sfen, timeout_s, path=None):
     r, m, _ = _zyfamate_solve(sfen, timeout_s=timeout_s, nodes=20000000, path=path)
     mr.result = r
@@ -27331,6 +27409,12 @@ def _handle_isready(ctx, line):
         if _dl_start_err is None:
             _init_usiok_retry("ctx.dl_1", ctx.dl_1, _dl_1_opts)
         _init_usiok_retry("ctx.nnue_1", ctx.nnue_1, _nnue_1_opts)
+        # [ZYF-OFF-CYF] import 時に判定できなかった (.bat/WSL ラッパー等) nnue_1 も usi 応答で判定し、
+        # 未起動のうちに Pyfamate 側の Zyfamate / mate solver を外す。
+        if ((ctx._zyfamate or ctx.mate_solver is not None)
+                and _cfg_bool("Zyfamate_Off_With_Cyfamate", True)
+                and _announces_resident_zyfamate(ctx.nnue_1)):
+            _zyf_off_runtime(ctx)
 
         results = {}
         def wait_r(eng, key):
@@ -52117,6 +52201,13 @@ def _makebook_cli(extra_args: list) -> None:
     # 見つかったときだけ起動する。起動失敗時は None のままで機能はあくまで上乗せ。
     _zf_digger = None
     _zf_digger_setting = _mb_setting("zf_digger", "", "0").strip().lower()
+    # [ZYF-OFF-CYF] 対局エンジンが Zyfamate 常駐 (Cyfamate) なら外付け digger は起動しない。
+    if (_zf_digger_setting not in ("0", "false", "no")
+            and _cfg_bool("Zyfamate_Off_With_Cyfamate", True)
+            and _engine_has_resident_zyfamate(engine_path) is True):
+        print("[makebook][B13] Zyfamate 常駐詰み監視: OFF (engine has resident Zyfamate, "
+              "Zyfamate_Off_With_Cyfamate=true)")
+        _zf_digger_setting = "0"
     if _zf_digger_setting not in ("0", "false", "no"):
         # Zyfamate exe のパス解決: エンジンと同じディレクトリから探す。
         _zf_path = _mb_setting("zf_digger_path", "", "").strip().strip('"')
